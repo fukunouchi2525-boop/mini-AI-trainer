@@ -387,6 +387,7 @@
     font-weight: 700;
   }
   .paper-head p { margin: 0; font-size: 12.5px; color: var(--paper-ink-dim); line-height: 1.7; }
+  .paper-head p.chat-note { margin-top: 6px; padding-top: 8px; border-top: 1px dashed var(--paper-line); }
   .chat-body {
     height: 340px;
     overflow-y: auto;
@@ -399,6 +400,30 @@
   .msg.user { align-self: flex-end; background: var(--accent); color: #f3faf8; border-bottom-right-radius: 3px; }
   .msg.ai { align-self: flex-start; background: #eae1cd; color: var(--paper-ink); border-bottom-left-radius: 3px; }
   .msg.hint { align-self: center; color: var(--paper-ink-dim); font-size: 12.5px; text-align: center; max-width: 90%; }
+  .temp-row {
+    padding: 10px 16px 0;
+    border-top: 1px solid var(--paper-line);
+    display: grid;
+    gap: 6px;
+  }
+  .temp-row label {
+    font-size: 12px;
+    color: var(--paper-ink-dim);
+  }
+  .temp-row label b { color: var(--paper-ink); }
+  .temp-row input[type="range"] {
+    background: var(--paper-line);
+  }
+  .temp-row input[type="range"]::-webkit-slider-thumb {
+    background: var(--accent);
+    border-color: var(--paper-panel);
+  }
+  .temp-ticks {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10.5px;
+    color: var(--paper-ink-dim);
+  }
   .chat-input-row {
     display: flex;
     gap: 8px;
@@ -493,6 +518,21 @@
     </div>
 
     <div class="control-row">
+      <div class="control-label"><b>トークンの単位</b><span>モデルが何を1つの単位として学習するか</span></div>
+      <div class="mode-tabs">
+        <button class="mode-tab active" data-unit="char" id="tokenCharBtn" type="button">
+          <b>文字単位</b>
+          1文字ずつ予測します。データが少なくても学習しやすい代わりに、単語としてのまとまりは学びません
+        </button>
+        <button class="mode-tab" data-unit="word" id="tokenWordBtn" type="button">
+          <b>単語単位</b>
+          Intl.Segmenterでの分かち書きをもとに、単語ごと予測します。「らしさ」は出やすい反面、覚える単位が減って未知の語には弱くなります
+        </button>
+      </div>
+      <div class="safety-note" id="segmenterNote" style="display:none;">このブラウザは単語単位の分割(Intl.Segmenter)に対応していないため、文字単位のみ使えます。</div>
+    </div>
+
+    <div class="control-row">
       <div class="control-label"><b>モデルの大きさ</b><span id="sizeName">小</span></div>
       <div class="size-slider-wrap">
         <input type="range" id="sizeSlider" min="0" max="4" step="1" value="1">
@@ -550,9 +590,15 @@
         <div class="paper-head">
           <h2>会話してみる</h2>
           <p id="chatSub">学習前は意味不明な返事になります。それも含めて「育っていく過程」として見てください。</p>
+          <p class="chat-note">このモデルは文字の並びのパターンを覚えているだけで、意味を理解しているわけではありません。学習データにない質問や言い回しには、正しく答えられないのが普通です。</p>
         </div>
         <div class="chat-body" id="chatBody">
           <div class="msg hint">学習を始めるとここで話しかけられるようになります</div>
+        </div>
+        <div class="temp-row">
+          <label for="tempSlider">ランダムさ(temperature): <b id="tempValue">0.7</b></label>
+          <input type="range" id="tempSlider" min="0.1" max="1.2" step="0.05" value="0.7">
+          <div class="temp-ticks"><span>暗記通り</span><span>自由</span></div>
         </div>
         <div class="chat-input-row">
           <input type="text" id="chatInput" placeholder="学習をはじめてから入力できます" disabled>
@@ -594,6 +640,7 @@
   /* ============ State ============ */
   const state = {
     mode: "text",
+    tokenUnit: "char", // "char" or "word"
     customText: null,
     customChatPairs: null,
     trainingActive: false,
@@ -602,6 +649,19 @@
     globalStep: 0,
     epoch: 0,
   };
+
+  // Intl.Segmenter gives word-level tokenization for Japanese with no
+  // dictionary download — it's a built-in browser API, not a library.
+  const SEGMENTER = (typeof Intl !== "undefined" && Intl.Segmenter)
+    ? new Intl.Segmenter("ja", { granularity: "word" })
+    : null;
+
+  function tokenize(text) {
+    if (state.tokenUnit === "word" && SEGMENTER) {
+      return Array.from(SEGMENTER.segment(text), s => s.segment);
+    }
+    return Array.from(text);
+  }
 
   const SIZE_PRESETS = [
     { name: "極小", hidden: 24  },
@@ -621,6 +681,7 @@
   /* ============ DOM refs ============ */
   const $ = id => document.getElementById(id);
   const tabText = $("tabText"), tabChat = $("tabChat");
+  const tokenCharBtn = $("tokenCharBtn"), tokenWordBtn = $("tokenWordBtn"), segmenterNote = $("segmenterNote");
   const uploadBtn = $("uploadBtn"), fileInput = $("fileInput"), uploadStatus = $("uploadStatus");
   const dataPreview = $("dataPreview");
   const sizeSlider = $("sizeSlider"), sizeName = $("sizeName");
@@ -631,6 +692,8 @@
   const statusBar = $("statusBar");
   const termBody = $("termBody");
   const chatBody = $("chatBody"), chatInput = $("chatInput"), chatSend = $("chatSend"), chatSub = $("chatSub");
+  const tempSlider = $("tempSlider"), tempValue = $("tempValue");
+  tempSlider.addEventListener("input", () => { tempValue.textContent = (+tempSlider.value).toFixed(2); });
   const exportDataBtn = $("exportDataBtn"), exportModelBtn = $("exportModelBtn");
   const loadModelBtn = $("loadModelBtn"), modelFileInput = $("modelFileInput");
 
@@ -657,6 +720,24 @@
   }
   tabText.addEventListener("click", () => setMode("text"));
   tabChat.addEventListener("click", () => setMode("chat"));
+
+  function setTokenUnitUI(unit) {
+    tokenCharBtn.classList.toggle("active", unit === "char");
+    tokenWordBtn.classList.toggle("active", unit === "word");
+  }
+  if (!SEGMENTER) {
+    tokenWordBtn.disabled = true;
+    segmenterNote.style.display = "";
+  } else {
+    tokenWordBtn.addEventListener("click", () => {
+      state.tokenUnit = "word";
+      setTokenUnitUI("word");
+    });
+  }
+  tokenCharBtn.addEventListener("click", () => {
+    state.tokenUnit = "char";
+    setTokenUnitUI("char");
+  });
 
   uploadBtn.addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", (e) => {
@@ -849,8 +930,8 @@
     return a;
   }
 
-  function buildVocab(text) {
-    const set = new Set(Array.from(text));
+  function buildVocab(tokens) {
+    const set = new Set(tokens);
     const chars = Array.from(set).sort();
     const stoi = new Map();
     chars.forEach((c, i) => stoi.set(c, i));
@@ -953,14 +1034,38 @@
   let vocabInfo = null; // { chars, stoi, itos, PAD }
   let examples = [];
 
-  function buildExamples(text, stoi, contextLen, PAD) {
-    const ids = Array.from(text).map(c => stoi.get(c));
+  function buildExamples(tokens, stoi, contextLen, PAD) {
+    const ids = tokens.map(c => stoi.get(c));
     const padded = new Array(contextLen).fill(PAD).concat(ids);
     const ex = [];
     for (let i = 0; i < ids.length; i++) {
       ex.push({ ctx: padded.slice(i, i + contextLen), target: ids[i] });
     }
     return ex;
+  }
+
+  // In chat mode, each Q/A pair needs its own leading padding so the model
+  // learns "start of a turn" from every question, not just whichever one
+  // happens to sit first in the concatenated corpus. Text mode has no such
+  // turn boundaries, so it's built as one continuous sliding window instead.
+  // filterFn (optional) drops tokens the current vocab doesn't contain —
+  // used when resuming training after loading a saved model.
+  function buildTrainingExamples(stoi, contextLen, PAD, filterFn) {
+    if (state.mode === "chat") {
+      const pairs = state.customChatPairs !== null ? state.customChatPairs : PRESET_CHAT;
+      let all = [];
+      for (const [q, a] of pairs) {
+        let tokens = tokenize(`Q: ${q}\nA: ${a}\n`);
+        if (filterFn) tokens = tokens.filter(filterFn);
+        if (tokens.length < 2) continue;
+        all = all.concat(buildExamples(tokens, stoi, contextLen, PAD));
+      }
+      return all;
+    } else {
+      let tokens = tokenize(currentCorpus());
+      if (filterFn) tokens = tokens.filter(filterFn);
+      return buildExamples(tokens, stoi, contextLen, PAD);
+    }
   }
 
   function shuffle(arr) {
@@ -971,7 +1076,7 @@
   }
 
   function generateText(seedText, length, temperature) {
-    let ctx = Array.from(seedText).map(c => vocabInfo.stoi.has(c) ? vocabInfo.stoi.get(c) : vocabInfo.PAD);
+    let ctx = tokenize(seedText).map(c => vocabInfo.stoi.has(c) ? vocabInfo.stoi.get(c) : vocabInfo.PAD);
     ctx = ctx.slice(-CONTEXT_LEN);
     while (ctx.length < CONTEXT_LEN) ctx = [vocabInfo.PAD, ...ctx];
     let out = [];
@@ -1045,19 +1150,20 @@
 
   function startTraining() {
     const text = currentCorpus();
-    if (Array.from(text).length < 20) {
+    const tokens = tokenize(text);
+    if (tokens.length < 20) {
       logLine("学習データが短すぎます。もう少し長い文章を用意してください。", "warn");
       return;
     }
     const hidden = currentHidden();
     const embed = embedFor(hidden);
-    const { chars, stoi } = buildVocab(text);
+    const { chars, stoi } = buildVocab(tokens);
     const itos = new Map(); chars.forEach((c, i) => itos.set(i, c));
     const PAD = chars.length;
     itos.set(PAD, "");
     vocabInfo = { chars, stoi, itos, PAD };
 
-    examples = buildExamples(text, stoi, CONTEXT_LEN, PAD);
+    examples = buildTrainingExamples(stoi, CONTEXT_LEN, PAD);
     shuffle(examples);
 
     state.model = new MLPLM(chars.length, CONTEXT_LEN, embed, hidden);
@@ -1072,8 +1178,9 @@
 
     paramCountEl.textContent = state.model.paramCount().toLocaleString("ja-JP");
 
+    const unitLabel = state.tokenUnit === "word" ? "単語数" : "文字数";
     termBody.innerHTML = "";
-    logLine(`データ文字数: ${Array.from(text).length}　語彙数: ${chars.length}　パラメータ数: ${state.model.paramCount().toLocaleString("ja-JP")}`, "info");
+    logLine(`データ${unitLabel}: ${tokens.length}　語彙数: ${chars.length}　パラメータ数: ${state.model.paramCount().toLocaleString("ja-JP")}`, "info");
     logLine("学習を開始します…", "info");
 
     startBtn.disabled = true;
@@ -1085,6 +1192,7 @@
     benchBtn.disabled = true;
     tabText.disabled = tabChat.disabled = true;
     uploadBtn.disabled = true;
+    tokenCharBtn.disabled = tokenWordBtn.disabled = true;
 
     chatInput.disabled = false;
     chatSend.disabled = false;
@@ -1121,6 +1229,7 @@
     benchBtn.disabled = false;
     tabText.disabled = tabChat.disabled = false;
     uploadBtn.disabled = false;
+    tokenCharBtn.disabled = tokenWordBtn.disabled = false;
     chatInput.disabled = true;
     chatSend.disabled = true;
     chatInput.value = "";
@@ -1155,12 +1264,13 @@
     chatInput.value = "";
     let seed = text;
     let reply;
+    const temperature = +tempSlider.value;
     if (state.mode === "chat") {
       seed = `Q: ${text}\nA: `;
-      reply = generateText(seed, 60, 0.7);
+      reply = generateText(seed, 60, temperature);
       reply = reply.split(/[\n\u23ce]/)[0].split(/Q[:：]/)[0].trim();
     } else {
-      reply = generateText(seed, 60, 0.7).trim();
+      reply = generateText(seed, 60, temperature).trim();
     }
     if (!reply) reply = "(まだ何も出てこなかった…もう少し学習が進むと変わるはず)";
     addMsg(reply, "ai");
@@ -1187,6 +1297,7 @@
     if (!state.model) return;
     const payload = {
       contextLen: CONTEXT_LEN,
+      tokenUnit: state.tokenUnit,
       embedDim: state.model.E,
       hiddenSize: state.model.H,
       vocab: vocabInfo.chars,
@@ -1224,6 +1335,8 @@
 
       if (state.rafHandle) cancelAnimationFrame(state.rafHandle);
       state.trainingActive = false;
+      state.tokenUnit = (payload.tokenUnit === "word" && SEGMENTER) ? "word" : "char";
+      setTokenUnitUI(state.tokenUnit);
 
       const chars = payload.vocab;
       const stoi = new Map(); chars.forEach((c, i) => stoi.set(c, i));
@@ -1247,12 +1360,11 @@
       state.model = model;
 
       // Try to line up training examples from whatever data is currently
-      // selected, so training can be resumed — characters the loaded model
+      // selected, so training can be resumed — tokens the loaded model
       // doesn't know are skipped rather than breaking the indices.
-      const raw = Array.from(currentCorpus());
-      const filtered = raw.filter(c => stoi.has(c)).join("");
-      const skipped = raw.length - Array.from(filtered).length;
-      examples = filtered.length >= 20 ? buildExamples(filtered, stoi, contextLen, PAD) : [];
+      const raw = tokenize(currentCorpus());
+      const skipped = raw.filter(c => !stoi.has(c)).length;
+      examples = buildTrainingExamples(stoi, contextLen, PAD, c => stoi.has(c));
       shuffle(examples);
 
       state.globalStep = payload.trainedSteps || 0;
@@ -1278,7 +1390,7 @@
       benchBtn.disabled = true;
       tabText.disabled = tabChat.disabled = true;
       uploadBtn.disabled = true;
-
+      tokenCharBtn.disabled = tokenWordBtn.disabled = true;
       chatInput.disabled = false;
       chatSend.disabled = false;
       chatBody.innerHTML = "";
